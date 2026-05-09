@@ -5,9 +5,6 @@ import pandas as pd
 df_1 = pd.read_excel('D:\\大二下课\\发展金融学\\论文\\托宾Q.xlsx')
 df_2= pd.read_excel('D:\\大二下课\\发展金融学\\论文\\ESG总分分歧.xlsx')
 
-
-
-
 df_result = pd.merge(df_1,df_2,on=['Stkcd','Year'],how='left')
 
 df_result.to_excel('merged_1.xlsx', index=False)
