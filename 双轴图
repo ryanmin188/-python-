@@ -1,0 +1,89 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import matplotlib as mpl
+
+# =========================
+# 1. 数据
+# =========================
+df = pd.read_excel(r"D:\大二下课\发展金融学\论文\esg_sd_mean.xlsx")
+
+# =========================
+# 2. 中文字体
+# =========================
+mpl.rcParams["font.family"] = "Microsoft YaHei"
+mpl.rcParams["axes.unicode_minus"] = False
+
+# =========================
+# 3. 风格
+# =========================
+sns.set_style("whitegrid")
+
+fig, ax1 = plt.subplots(figsize=(11,6), dpi=200)
+
+# =========================
+# 4. 主轴：ESG均值
+# =========================
+l1 = ax1.plot(
+    df["Year"],
+    df["ESG_year_mean"],
+    color="#1f4e79",
+    linewidth=3,
+    label="ESG Mean"
+)
+
+ax1.set_ylabel("ESG Mean", color="#1f4e79", fontsize=12)
+ax1.tick_params(axis='y', labelcolor="#1f4e79")
+
+# 去掉上/右边框（更论文风）
+ax1.spines["top"].set_visible(False)
+ax1.spines["right"].set_visible(False)
+
+# =========================
+# 5. 副轴：ESG分歧
+# =========================
+ax2 = ax1.twinx()
+
+l2 = ax2.plot(
+    df["Year"],
+    df["ESG_sd_mean"],
+    color="#d1495b",
+    linewidth=3,
+    linestyle="--",
+    label="ESG Dispersion (SD)"
+)
+
+ax2.set_ylabel("ESG Dispersion (SD)", color="#d1495b", fontsize=12)
+ax2.tick_params(axis='y', labelcolor="#d1495b")
+
+ax2.spines["top"].set_visible(False)
+
+# =========================
+# 6. 标题
+# =========================
+plt.title("ESG Level and Divergence Over Time", fontsize=15, pad=12)
+
+# =========================
+# 7. ⭐图例（最终优化：完全避开右轴）
+# =========================
+lines = l1 + l2
+labels = [l.get_label() for l in lines]
+
+ax1.legend(
+    lines,
+    labels,
+    loc="center left",
+    bbox_to_anchor=(1.18, 0.5),   # ⭐最终右移
+    frameon=False,
+    fontsize=10
+)
+
+# =========================
+# 8. ⭐布局优化（防裁剪核心）
+# =========================
+plt.margins(x=0.02)
+
+plt.subplots_adjust(right=0.70)  # ⭐给图例留足空间
+plt.tight_layout()
+
+plt.show()
