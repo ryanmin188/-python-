@@ -1,0 +1,89 @@
+趋势图
+  import pandas as pd
+df = pd.read_excel(r"D:\大二下课\发展金融学\论文\raw_esg.xlsx")
+import seaborn as sns
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+
+# =========================
+# 中文字体（稳定）
+# =========================
+font_path = "C:/Windows/Fonts/msyh.ttc"
+font_prop = font_manager.FontProperties(fname=font_path)
+
+matplotlib.rcParams['axes.unicode_minus'] = False
+
+sns.set_style("white")
+plt.rcParams["figure.dpi"] = 200
+
+plt.figure(figsize=(12, 6))
+
+# =========================
+# 统一蓝色系（彭博也改掉）
+# =========================
+colors = {
+    "MSCI": "#0B2E4A",
+    "富时罗素": "#1B4F72",
+    "盟浪": "#2E86C1",
+    "商道": "#3498DB",
+    "和讯": "#5DADE2",
+    "CNRDS": "#7FB3D5",
+    "wind": "#A9CCE3",
+    "华证": "#85C1E9",
+    "润灵环球": "#AED6F1",
+    "彭博": "#4A90E2"   # ✅ 改为蓝色系（统一但稍突出）
+}
+
+agency_cols = [
+    "MSCI","富时罗素","盟浪","商道","和讯",
+    "CNRDS","wind","华证","润灵环球","彭博"
+]
+
+# =========================
+# 背景网格（轻）
+# =========================
+plt.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.25)
+
+# =========================
+# 绘图
+# =========================
+for col in agency_cols:
+    plt.plot(
+        df["Year"],
+        df[col],
+        linewidth=2,
+        color=colors[col],
+        alpha=0.9,
+        label=col
+    )
+
+# =========================
+# 标题轴
+# =========================
+plt.title("ESG Ratings Across Rating Agencies", fontsize=15, pad=12, fontproperties=font_prop)
+plt.xlabel("Year", fontsize=12, fontproperties=font_prop)
+plt.ylabel("ESG Score", fontsize=12, fontproperties=font_prop)
+
+# =========================
+# ⭐ legend 移到图外（关键修改）
+# =========================
+plt.legend(
+    frameon=False,
+    ncol=2,
+    fontsize=9,
+    prop=font_prop,
+    loc="upper left",
+    bbox_to_anchor=(1.02, 1)   # 👉 图外右侧
+)
+
+# =========================
+# 去边框 + 布局优化
+# =========================
+sns.despine()
+plt.tight_layout()
+
+# 给右侧 legend 留空间
+plt.subplots_adjust(right=0.78)
+
+plt.show()
