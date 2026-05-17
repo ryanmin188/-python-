@@ -1,3 +1,4 @@
+//YEAR
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -31,6 +32,45 @@ sns.heatmap(
 
 plt.title("ESG Ratings Heatmap (Agency × Year)", fontsize=14)
 plt.xlabel("Year")
+plt.ylabel("Rating Agencies")
+
+plt.tight_layout()
+plt.show()
+
+//CORRELATION
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib
+
+# ===== 中文字体（防乱码）=====
+matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei']
+matplotlib.rcParams['axes.unicode_minus'] = False
+
+df = pd.read_excel(r"D:\大二下课\发展金融学\论文\corr.xlsx")
+
+agency_cols = ["盟浪","商道","和讯",
+               "CNRDS","wind","华证","润灵环球"]
+
+# =========================
+# 转换成长格式（heatmap必须）
+# =========================
+df_hm = df.set_index("Year")[agency_cols]
+
+# =========================
+# Heatmap
+# =========================
+plt.figure(figsize=(12,6))
+
+sns.heatmap(
+    df_hm.T,   # 机构在y轴
+    cmap="Blues",
+    linewidths=0.5,
+    linecolor="white"
+)
+
+plt.title("ESG Ratings Heatmap (Agency × Agency)", fontsize=14)
+plt.xlabel("Rating Agencies")
 plt.ylabel("Rating Agencies")
 
 plt.tight_layout()
