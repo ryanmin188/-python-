@@ -1,0 +1,238 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# =========================================================
+# 高温作业服优化模型（热阻-舒适度重构版）
+# =========================================================
+
+# =========================================================
+# 一、物理参数
+# =========================================================
+T_env = 65.0
+T_body = 37.0
+T0 = 37.0
+
+# 固定层厚度（单位：m）
+d1 = 0.0006
+d3 = 0.0036
+d4 = 0.0055
+
+# 第二层搜索范围
+d2_min = 17.578e-3
+d2_max = 25e-3
+
+# 热物性参数 (I, II, III, IV)
+rho = [300,   862,   74.2,    1.18]
+cp  = [1377, 2100,  1726,    1005]
+kmat = [0.082, 0.37,  0.045,   0.028]
+
+# 对流换热系数
+h1 = 113.0
+h4 = 8.344
+
+# =========================================================
+# 二、效用函数参数
+# =========================================================
+alpha_pref = 0.5   # 舒适度 C 的权重，(1 - alpha_pref) 为热阻 R 的权重
+
+# =========================================================
+# 三、数值参数
+# =========================================================
+dt = 1.0
+t_end = 60 * 60
+Nt = int(t_end / dt)
+Nx = 220
+
+# =========================================================
+# 四、PDE求解器 (保持原样，提供底层物理仿真)
+# =========================================================
+def solve_temperature(d2):
+    L = d1 + d2 + d3 + d4
+    dx = L / Nx
+    x = np.linspace(0, L, Nx + 1)
+
+    rho_arr = np.zeros(Nx + 1)
+    cp_arr  = np.zeros(Nx + 1)
+    k_arr   = np.zeros(Nx + 1)
+
+    for i in range(Nx + 1):
+        xi = x[i]
+        if xi <= d1:
+            idx = 0
+        elif xi <= d1 + d2:
+            idx = 1
+        elif xi <= d1 + d2 + d3:
+            idx = 2
+        else:
+            idx = 3
+        rho_arr[i] = rho[idx]
+        cp_arr[i]  = cp[idx]
+        k_arr[i]   = kmat[idx]
+
+    T = np.ones(Nx + 1) * T0
+    skin_temp = []
+
+    for n in range(Nt):
+        A = np.zeros((Nx + 1, Nx + 1))
+        b = np.zeros(Nx + 1)
+
+        for i in range(1, Nx):
+            k_plus = 2 * k_arr[i] * k_arr[i+1] / (k_arr[i] + k_arr[i+1])
+            k_minus = 2 * k_arr[i] * k_arr[i-1] / (k_arr[i] + k_arr[i-1])
+            alpha_plus = k_plus * dt / (rho_arr[i] * cp_arr[i] * dx**2)
+            alpha_minus = k_minus * dt / (rho_arr[i] * cp_arr[i] * dx**2)
+
+            A[i, i-1] = -alpha_minus / 2
+            A[i, i] = 1 + (alpha_plus + alpha_minus) / 2
+            A[i, i+1] = -alpha_plus / 2
+            b[i] = (alpha_minus / 2) * T[i-1] + (1 - (alpha_plus + alpha_minus) / 2) * T[i] + (alpha_plus / 2) * T[i+1]
+
+        # 左边界
+        k0 = k_arr[0]
+        alpha0 = k0 * dt / (rho_arr[0] * cp_arr[0] * dx**2)
+        beta1 = h1 * dx / k0
+        A[0,0] = 1 + alpha0 * (1 + beta1)
+        A[0,1] = -alpha0
+        b[0] = (1 - alpha0 * (1 + beta1)) * T[0] + alpha0 * T[1] + 2 * alpha0 * beta1 * T_env
+
+        # 右边界
+        kN = k_arr[-1]
+        alphaN = kN * dt / (rho_arr[-1] * cp_arr[-1] * dx**2)
+        beta4 = h4 * dx / kN
+        A[Nx, Nx-1] = -alphaN
+        A[Nx, Nx] = 1 + alphaN * (1 + beta4)
+        b[Nx] = alphaN * T[Nx-1] + (1 - alphaN * (1 + beta4)) * T[Nx] + 2 * alphaN * beta4 * T_body
+
+        T = np.linalg.solve(A, b)
+        skin_temp.append(T[-1])
+
+    return np.array(skin_temp)
+
+def get_metrics(d2):
+    T = solve_temperature(d2)
+    Tmax = np.max(T)
+    tau = np.sum(T > 44) * dt
+    return Tmax, tau
+
+# =========================================================
+# =========================================================
+# 五、重构后的无量纲指标函数与效用函数
+# =========================================================
+
+def comfort(d2):
+    # 舒适度：从 1 递减到 0
+    x = (d2 - d2_min) / (d2_max - d2_min)
+    return 1 - np.sqrt(x)
+
+
+def safety_score(d2):
+    # 1. 物理热阻计算
+    k2 = kmat[1]
+    R = d2 / k2
+
+    # 2. 物理极限边界
+    R_min = d2_min / k2
+    R_max = d2_max / k2
+
+    # 3. 无量纲效用映射：从 0 递增到 1
+    S = (R - R_min) / (R_max - R_min)
+    return S
+
+
+def utility(d2):
+    # 第一问 PDE 刚性红线硬拦截
+    Tmax, tau = get_metrics(d2)
+    if Tmax > 47.0 or tau > 300:
+        return -1e9
+
+    # 计算平齐量级下的决策指标
+    X = comfort(d2)
+    Y = safety_score(d2)
+
+    if X <= 0 or Y <= 0:
+        return -1e9
+
+    # 柯布-道格拉斯合成（此时凹凸性完全正常）
+    U = (X ** alpha_pref) * (Y ** (1 - alpha_pref))
+    return U
+# 六、黄金分割搜索求解
+# =========================================================
+phi_ratio = (1 + np.sqrt(5)) / 2
+a = d2_min
+b = d2_max
+tol = 1e-5
+iteration = 0
+
+print("="*60)
+print("开始黄金分割搜索最优解...")
+print("="*60)
+
+while abs(b - a) > tol:
+    iteration += 1
+    x1 = b - (b - a) / phi_ratio
+    x2 = a + (b - a) / phi_ratio
+
+    U1 = utility(x1)
+    U2 = utility(x2)
+
+    print(f"Iter {iteration:02d} | x1={x1*1000:.3f}mm, x2={x2*1000:.3f}mm | U1={U1:.6f}, U2={U2:.6f}")
+
+    if U1 > U2:
+        b = x2
+    else:
+        a = x1
+
+d2_opt = (a + b) / 2
+U_opt = utility(d2_opt)
+C_opt = comfort(d2_opt)
+R_opt = safety_score(d2_opt)
+
+print("="*60)
+print(f"搜索结束！最优厚度 d2* = {d2_opt*1000:.4f} mm")
+print(f"最大综合效用 U* = {U_opt:.6f}")
+print(f"此时的舒适度 C = {C_opt:.4f}, 本征热阻 R = {R_opt:.4f} m²·K/W")
+print("="*60)
+
+# =========================================================
+# 七、数据采样与科学绘图
+# =========================================================
+print("正在采样作图数据（调用 PDE 验证整体空间曲线）...")
+# 采样 40 个点以确保绘制出平滑的曲线且兼顾计算速度
+d2_vals = np.linspace(d2_min, d2_max, 40)
+U_vals = []
+C_vals = []
+R_vals = []
+
+for d in d2_vals:
+    U_vals.append(utility(d))
+    C_vals.append(comfort(d))
+    R_vals.append(safety_score(d))
+
+U_vals = np.array(U_vals)
+C_vals = np.array(C_vals)
+R_vals = np.array(R_vals)
+
+# 创建 1x2 的高阶学术画布
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+# 图 1：U 与 d2 的单峰关系图
+ax1.plot(d2_vals * 1000, U_vals, color='#1f77b4', lw=2.5, label='Utility Curve $U(d_2)$')
+ax1.axvline(d2_opt * 1000, color='r', linestyle='--', lw=1.5, label=f'Optimal $d_2^*$ ({d2_opt*1000:.3f} mm)')
+ax1.scatter(d2_opt * 1000, U_opt, color='red', s=80, zorder=5)
+ax1.set_title('Optimization Space: Utility vs. Thickness $d_2$', fontsize=12, pad=10)
+ax1.set_xlabel('Thickness $d_2$ (mm)', fontsize=10)
+ax1.set_ylabel('Total Utility $U$', fontsize=10)
+ax1.grid(True, linestyle=':', alpha=0.6)
+ax1.legend(loc='best')
+
+# 图 2：C 与 R 的指标协同博弈图（几何相切轨迹）
+ax2.plot(R_vals, C_vals, color='#2ca02c', lw=2.5, label='Physical Boundary Curve')
+ax2.scatter(R_opt, C_opt, color='red', s=80, zorder=5, label=f'Tangency Solution\n(R={R_opt:.3f}, C={C_opt:.2f})')
+ax2.set_title('Decision Space: Comfort $C$ vs. Thermal Resistance $R$', fontsize=12, pad=10)
+ax2.set_xlabel(r'Thermal Resistance $R$ ($m^2 \cdot K / W$)', fontsize=10)
+ax2.set_ylabel('Comfort Score $C$', fontsize=10)
+ax2.grid(True, linestyle=':', alpha=0.6)
+ax2.legend(loc='best')
+
+plt.tight_layout()
+plt.show()
