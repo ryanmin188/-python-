@@ -1,0 +1,241 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from pymoo.core.problem import ElementwiseProblem
+from pymoo.algorithms.moo.nsga2 import NSGA2
+from pymoo.optimize import minimize
+
+# =========================================================================
+# 一、 第三问物理及工程热力学参数设定 (环境温度 80ºC, 30分钟)
+# =========================================================================
+T_env = 80.0
+T_body = 37.0
+T0 = 37.0
+
+# 刚性固定层厚度 (单位: m)
+d1 = 0.0006
+d3 = 0.0036
+
+# 各层热物性参数: [I层, II层, III层, IV层]
+rho = [300.0, 862.0, 74.2, 1.18]
+cp = [1377.0, 2100.0, 1726.0, 1005.0]
+kmat = [0.082, 0.37, 0.045, 0.028]
+
+# 表面对流换热系数
+h1 = 113.0
+h4 = 8.344
+
+# 数值计算步长
+dt = 1.0
+t_end = 30 * 60  # 30分钟 = 1800秒
+Nt = int(t_end / dt)
+Nx = 220
+
+
+# =========================================================================
+# 二、 底层物理引擎：一维非稳态热传导 PDE 求解器 (动态适应 d2 和 d4)
+# =========================================================================
+def solve_temperature_3(d2, d4):
+    """
+    基于有限差分法，求解双变量 (d2, d4) 控制下的皮肤外侧温度全时段序列
+    """
+    L = d1 + d2 + d3 + d4
+    dx = L / Nx
+    x = np.linspace(0, L, Nx + 1)
+
+    rho_arr = np.zeros(Nx + 1)
+    cp_arr = np.zeros(Nx + 1)
+    k_arr = np.zeros(Nx + 1)
+
+    # 动态空间材质属性映射
+    for i in range(Nx + 1):
+        xi = x[i]
+        if xi <= d1:
+            idx = 0
+        elif xi <= d1 + d2:
+            idx = 1
+        elif xi <= d1 + d2 + d3:
+            idx = 2
+        else:
+            idx = 3
+        rho_arr[i] = rho[idx]
+        cp_arr[i] = cp[idx]
+        k_arr[i] = kmat[idx]
+
+    T = np.ones(Nx + 1) * T0
+    skin_temp = []
+
+    # 隐式时间步迭代求解
+    for n in range(Nt):
+        A = np.zeros((Nx + 1, Nx + 1))
+        b = np.zeros(Nx + 1)
+
+        for i in range(1, Nx):
+            k_plus = 2 * k_arr[i] * k_arr[i + 1] / (k_arr[i] + k_arr[i + 1])
+            k_minus = 2 * k_arr[i] * k_arr[i - 1] / (k_arr[i] + k_arr[i - 1])
+            alpha_plus = k_plus * dt / (rho_arr[i] * cp_arr[i] * dx ** 2)
+            alpha_minus = k_minus * dt / (rho_arr[i] * cp_arr[i] * dx ** 2)
+
+            A[i, i - 1] = -alpha_minus / 2
+            A[i, i] = 1 + (alpha_plus + alpha_minus) / 2
+            A[i, i + 1] = -alpha_plus / 2
+            b[i] = (alpha_minus / 2) * T[i - 1] + (1 - (alpha_plus + alpha_minus) / 2) * T[i] + (alpha_plus / 2) * T[
+                i + 1]
+
+        # 环境侧左边界条件
+        k0 = k_arr[0]
+        alpha0 = k0 * dt / (rho_arr[0] * cp_arr[0] * dx ** 2)
+        beta1 = h1 * dx / k0
+        A[0, 0] = 1 + alpha0 * (1 + beta1)
+        A[0, 1] = -alpha0
+        b[0] = (1 - alpha0 * (1 + beta1)) * T[0] + alpha0 * T[1] + 2 * alpha0 * beta1 * T_env
+
+        # 皮肤侧右边界条件
+        kN = k_arr[-1]
+        alphaN = kN * dt / (rho_arr[-1] * cp_arr[-1] * dx ** 2)
+        beta4 = h4 * dx / kN
+        A[Nx, Nx - 1] = -alphaN
+        A[Nx, Nx] = 1 + alphaN * (1 + beta4)
+        b[Nx] = alphaN * T[Nx - 1] + (1 - alphaN * (1 + beta4)) * T[Nx] + 2 * alphaN * beta4 * T_body
+
+        T = np.linalg.solve(A, b)
+        skin_temp.append(T[-1])
+
+    time_grid = np.linspace(0, t_end, Nt)
+    return time_grid, np.array(skin_temp)
+
+
+# Henriques 生物热损伤积分函数 (烧伤核心指标)
+def calculate_burn_integral(time_grid, T_skin):
+    dt_step = time_grid[1] - time_grid[0]
+    Omega = 0.0
+    for T_c in T_skin:
+            T_k = T_c + 273.15
+            # 分段动力学常数判定
+            P, DE_R = (2.185e124, 93534.9) if T_c < 50.0 else (1.823e51, 39109.8)
+            Omega += P * np.exp(-DE_R / T_k) * dt_step
+    return Omega
+
+
+# =========================================================================
+# 三、 构建 Pymoo 多目标寻优问题框架 (双目标 + 双刚性约束)
+# =========================================================================
+class GarmentMultiObjectiveProblem(ElementwiseProblem):
+    def __init__(self):
+        super().__init__(
+            n_var=2,  # 决策变量: [d2, d4]
+            n_obj=2,  # 优化目标: [Min 质量, Min 烧伤积分对数]
+            n_constr=2,  # 刚性题干约束: [最高温 <= 47, >44度时间 <= 5分钟]
+            xl=np.array([0.0006, 0.0006]),  # 变量下界 (单位: m)
+            xu=np.array([0.0250, 0.0064])  # 变量上界 (单位: m)
+        )
+
+    def _evaluate(self, x, out, *args, **kwargs):
+        d2, d4 = x[0], x[1]
+
+        # 1. 启动底层物理仿真
+        time_grid, T_skin = solve_temperature_3(d2, d4)
+
+        # 2. 提取约束评估参量
+        max_T = np.max(T_skin)
+        time_above_44 = np.sum(T_skin > 44.0) * dt  # 累计超过44℃的时间(秒)
+
+        # 3. 约束函数拼装 (g <= 0 视为可行解区域)
+        g1 = max_T - 47.0  # 约束一: 皮肤外侧最高温度不超过 47℃
+        g2 = time_above_44 - 300.0  # 约束二: 超过 44℃ 的时间不超过 5分钟 (300秒)
+
+        # 4. 目标函数计算 (在符合题意的前提下最小化质量，同时在小于1的安全空间内最小化热损伤)
+        obj_mass = rho[1] * d2 + rho[3] * d4  # 目标一: 最小化织物整体质量负荷
+
+        Omega = calculate_burn_integral(time_grid, T_skin)
+        obj_safety = np.log10(Omega + 1e-12)  # 目标二: 最小化烧伤积分 (采用对数算子压缩数量级梯度)
+
+        out["F"] = [obj_mass, obj_safety]
+        out["G"] = [g1, g2]
+
+
+# =========================================================================
+# 四、 执行算法演行，逼近帕累托最优前沿 (Pareto Frontier)
+# =========================================================================
+print("=" * 60)
+print("正在通过 NSGA-II 算法搜索第三问多目标最优配置解...")
+print("=" * 60)
+
+problem = GarmentMultiObjectiveProblem()
+# 设定种群规模 50，进化 20 代以平衡竞赛解算精度与代码运行时间
+algorithm = NSGA2(pop_size=50)
+res = minimize(problem, algorithm, termination=('n_gen', 20), seed=42, verbose=True)
+
+pareto_X = res.X  # 帕累托前沿厚度空间 [d2, d4]
+pareto_F = res.F  # 帕累托前沿目标空间 [质量, Log_Omega]
+
+if pareto_F is None or len(pareto_F) == 0:
+    raise ValueError("未探索到满足温度和时间双重刚性红线的可行解，请检查参数或扩大空间上下限！")
+
+# =========================================================================
+# 五、 串联下游决策：熵权法 (Entropy Weight Method) 客观优化选点
+# =========================================================================
+print("\n[下游决策激活] 帕累托最优集涌现成功，正在代入熵权矩阵...")
+
+df_decision = pd.DataFrame(pareto_F, columns=['Mass_Goal', 'Safety_Goal'])
+
+# 极差极大极小规范化 (因两个目标皆要求极小化，将其转换为反向映射得分)
+df_min = df_decision.min()
+df_max = df_decision.max()
+denom = (df_max - df_min).replace(0, 1e-6)
+df_norm = (df_max - df_decision) / denom
+
+# 计算特征概率比重矩阵 P
+p_matrix = df_norm / df_norm.sum()
+
+# 计算信息熵 E
+k = 1.0 / np.log(len(df_decision))
+entropy = -k * (p_matrix * np.log(p_matrix + 1e-9)).sum()
+
+# 计算冗余度并输出客观权重 W
+redundancy = 1.0 - entropy
+weights = redundancy / redundancy.sum()
+
+print("-" * 50)
+print(f"-> 经熵权决策计算：衣服质量目标权重: {weights['Mass_Goal']:.4f}")
+print(f"-> 经熵权决策计算：本征安全目标权重: {weights['Safety_Goal']:.4f}")
+print("-" * 50)
+
+# 综合评价得分计算 (TOPSIS思想：得分最大化者胜出)
+df_decision['Score'] = (df_norm * weights).sum(axis=1)
+best_idx = df_decision['Score'].idxmax()
+
+# 还原黄金决策点的物理与生物指标
+best_d2_mm = pareto_X[best_idx][0] * 1000
+best_d4_mm = pareto_X[best_idx][1] * 1000
+final_mass = pareto_F[best_idx][0]
+final_omega = 10 ** (pareto_F[best_idx][1]) - 1.0
+
+print(f"【第三问最终核心优化结论】")
+print(f"最优 II 层织物厚度 d2* = {best_d2_mm:.4f} mm")
+print(f"最优 IV 层空气厚度 d4* = {best_d4_mm:.4f} mm")
+print(f"该特定配比下：防热服整体面质量指标 = {final_mass:.4f}, 生物热损伤指数 Omega = {final_omega:.6f}")
+print("=" * 60)
+
+# =========================================================================
+# 六、 绘制高阶学术图表：Pareto 前沿点阵与客观决策选点
+# =========================================================================
+plt.figure(figsize=(7.5, 5.5))
+
+# 1. 绘制帕累托锋线
+plt.scatter(pareto_F[:, 0], pareto_F[:, 1], color='#1f77b4', s=40, alpha=0.8,
+             edgecolors='w', linewidths=0.5, label='Pareto Optimal Frontier')
+
+# 2. 极其高亮标出经由熵权法精准遴选的黄金交叉解
+plt.scatter(pareto_F[best_idx, 0], pareto_F[best_idx, 1], color='#d62728', s=140,
+             edgecolor='black', lw=1.5, zorder=5,
+             label=f'Optimal Multi-Criteria Solution\n(d2*={best_d2_mm:.2f}mm, d4*={best_d4_mm:.2f}mm)')
+
+plt.title('Question 3: Two-Objective Pareto Frontier & EWM Selection', fontsize=11, fontweight='bold', pad=12)
+plt.xlabel('Fabric Weight Objective ($M$)', fontsize=10)
+plt.ylabel(r'Biological Heat Damage Objective ($\log_{10}(\Omega+1)$)', fontsize=10)
+plt.grid(True, linestyle=':', alpha=0.5)
+plt.legend(loc='best', fontsize=9.5)
+
+plt.tight_layout()
+plt.show()
